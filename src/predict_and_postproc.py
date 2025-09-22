@@ -1,5 +1,4 @@
-cat > src/predict_and_postproc.py <<'PY'
-# src/predict_and_postproc.py
+
 import os
 import sys
 import numpy as np
@@ -100,4 +99,4 @@ if __name__ == "__main__":
     advisory = evaluate_and_advisory(proc_csv, scaler_file, model, in_len=30, out_len=OUT_LEN, device=device)
     import json
     print(json.dumps(advisory, indent=2))
-PY
+

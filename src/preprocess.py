@@ -1,5 +1,4 @@
-cat > src/preprocess.py <<'PY'
-# src/preprocess.py
+
 import os
 import glob
 import pandas as pd
@@ -65,4 +64,4 @@ if __name__ == "__main__":
         scaler_file = os.path.join(OUT_DIR, base_name + "_scaler.pkl")
         scaled_df, scaler = scale_and_save(df, out_csv, scaler_file)
         print("Saved processed:", out_csv, "and scaler:", scaler_file)
-PY
+

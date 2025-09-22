@@ -1,5 +1,4 @@
-cat > src/data_fetch.py <<'PY'
-# src/data_fetch.py
+
 import os
 import time
 import requests
@@ -51,4 +50,4 @@ if __name__ == "__main__":
             time.sleep(1.0)
         except Exception as e:
             print("Failed for", p["id"], "-", e)
-PY
+
