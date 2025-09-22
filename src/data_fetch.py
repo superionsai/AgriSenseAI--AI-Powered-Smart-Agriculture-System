@@ -38,7 +38,7 @@ def save_csv(text, out_path):
 
 if __name__ == "__main__":
     end = date.today()
-    start = end - timedelta(days=5*365)
+    start = end - timedelta(days=10*365)
     for p in POINTS:
         print("Fetching:", p["id"], p["lat"], p["lon"])
         try:
