@@ -1,0 +1,5 @@
+# (Codespace terminal, working dir is /workspaces/<repo>) Copy paste exact lines
+python src/data_fetch.py
+python src/preprocess.py
+python src/train.py
+python src/predict_and_postproc.py
