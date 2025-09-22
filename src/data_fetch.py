@@ -1,7 +1,6 @@
-python src/data_fetch.py
-python src/preprocess.py
-python src/train.py
-python src/predict_and_postproc.pyimport os
+cat > src/data_fetch.py <<'PY'
+# src/data_fetch.py
+import os
 import time
 import requests
 from datetime import date, timedelta
@@ -52,3 +51,4 @@ if __name__ == "__main__":
             time.sleep(1.0)
         except Exception as e:
             print("Failed for", p["id"], "-", e)
+PY
