@@ -14,21 +14,36 @@ os.makedirs(OUT_DIR, exist_ok=True)
 KEEP_VARS = ['PRECTOT','T2M','T2M_MAX','T2M_MIN','RH2M','WS2M']
 
 def load_power_csv(path):
-    df = pd.read_csv(path, comment='#')
-    if {'YEAR','MO','DY'}.issubset(df.columns):
+    # NASA POWER CSVs often include several metadata lines starting with #
+    # We must find the line that starts with "YEAR" or "DATE"
+    with open(path, "r") as f:
+        lines = f.readlines()
+
+    header_line = None
+    for i, line in enumerate(lines):
+        if line.startswith("YEAR") or line.startswith("DATE"):
+            header_line = i
+            break
+
+    if header_line is None:
+        raise RuntimeError(f"Could not find header row in {path}")
+
+    # Now read with skiprows until header_line
+    df = pd.read_csv(path, skiprows=header_line)
+    if 'YEAR' in df.columns and 'MO' in df.columns and 'DY' in df.columns:
         df['date'] = pd.to_datetime(df[['YEAR','MO','DY']])
         df.set_index('date', inplace=True)
     elif 'DATE' in df.columns:
         df['date'] = pd.to_datetime(df['DATE'])
         df.set_index('date', inplace=True)
     else:
-        try:
-            df.iloc[:,0] = pd.to_datetime(df.iloc[:,0])
-            df.set_index(df.columns[0], inplace=True)
-            df.index.name = 'date'
-        except Exception:
-            raise RuntimeError("Unrecognized CSV date columns in " + path)
+        # fallback: assume first col is date
+        df.iloc[:,0] = pd.to_datetime(df.iloc[:,0])
+        df.set_index(df.columns[0], inplace=True)
+        df.index.name = 'date'
+
     df = df.sort_index()
+    # keep only numeric
     numcols = df.select_dtypes(include=[np.number]).columns.tolist()
     return df[numcols]
 
