@@ -3,6 +3,7 @@ numpy
 scikit-learn
 torch
 requests
-matplotlib
 statsmodels
 joblib
+torchvision
+tqdm
