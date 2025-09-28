@@ -1,36 +1,13 @@
-# Run instructions for AgriSense Phase-1 (Codespaces-friendly)
-
-# 1) (Optional) create & activate venv
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 2) Install Python dependencies
-pip install --upgrade pip
+# Import required libraries
 pip install -r requirements.txt
 
-# 3) (If not done) fetch data from NASA POWER
+# Fetch + preprocess data
 python3 src/data_fetch.py
-
-# 4) Preprocess data (parses CSVs, imputes, scales, writes *_proc.csv and *_scaler.pkl)
 python3 src/preprocess.py
 
-# 5) Train model (saves best_model.pth at repo root)
+# Train the model
 python3 src/train.py
 
-# 6) Export OpenAI API key (required for LLM analysis in Codespaces)
-export OPENAI_API_KEY="sk-...replace with your key..."
-
-# 7) Run prediction + advisory + LLM analysis
+# Predict + advisory + LLM summary
+ollama pull llama3   # only once
 python3 src/predict_and_postproc.py
-
-# 8) Output:
-# A JSON document will be printed to stdout with keys:
-# - forecast_horizon_days
-# - forecast (list of daily dicts with date + features)
-# - advisory (rule-based signals)
-# - llm_analysis (summary, risks, recommendations, actions, raw_llm)
-
-# Troubleshooting:
-# - If you see errors about "best_model.pth not found", run step 5.
-# - If OpenAI LLM call fails, ensure OPENAI_API_KEY is set and your environment has internet access.
-# - For large datasets/training, run on a GPU-enabled machine (Codespaces is usually CPU-only).

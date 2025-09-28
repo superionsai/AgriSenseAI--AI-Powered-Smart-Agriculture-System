@@ -4,6 +4,4 @@ scikit-learn
 torch
 requests
 statsmodels
-joblib
-torchvision
-tqdm
+ollama
