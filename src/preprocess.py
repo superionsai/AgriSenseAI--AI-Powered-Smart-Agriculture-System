@@ -1,4 +1,4 @@
-# src/preprocess.py (robust NASA POWER CSV loader + preprocessing)
+# src/preprocess.py
 import os
 import glob
 import pandas as pd
@@ -7,132 +7,127 @@ from sklearn.preprocessing import MinMaxScaler
 import joblib
 from io import StringIO
 import csv
+import json
+from datetime import datetime
+from pathlib import Path
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-DATA_DIR = os.path.join(ROOT, "data", "nasa_power")
+NASA_DIR = os.path.join(ROOT, "data", "nasa_power")
+RAW_DIR = os.path.join(ROOT, "data", "raw")
 OUT_DIR = os.path.join(ROOT, "data", "processed")
 os.makedirs(OUT_DIR, exist_ok=True)
 
 KEEP_VARS = ['PRECTOT', 'T2M', 'T2M_MAX', 'T2M_MIN', 'RH2M', 'WS2M']
 
+from utils_fusion import (
+    detect_header_line if False else None  # placeholder for linter; we implement loaders below
+)
 
+# ---------- loaders ----------
 def detect_header_line(lines):
-    """Return index of header line (0-based) or None."""
     for i, line in enumerate(lines):
-        line_stripped = line.strip()
-        # common header patterns
-        if line_stripped.startswith("YEAR") and "MO" in line_stripped:
+        s = line.strip()
+        if s.startswith("YEAR") and "MO" in s:
             return i
-        if line_stripped.startswith("DATE") and "," in line_stripped:
+        if s.startswith("DATE") and "," in s:
             return i
-    # fallback: first line that looks like CSV header (has letters and commas)
     for i, line in enumerate(lines):
         if "," in line and any(c.isalpha() for c in line):
             return i
     return None
 
-
 def read_csv_from_header(path, header_line):
-    """Read CSV starting from header_line using pandas with a safe engine."""
     with open(path, "r", encoding="utf8", errors="ignore") as f:
-        data_str = "".join(f.readlines()[header_line:])
-    # Try pandas read_csv using python engine (more tolerant)
+        data = "".join(f.readlines()[header_line:])
     try:
-        df = pd.read_csv(StringIO(data_str), sep=",", engine="python", skip_blank_lines=True)
+        df = pd.read_csv(StringIO(data), sep=",", engine="python", skip_blank_lines=True)
         return df
-    except Exception as e:
-        # Fallback: use csv.reader then construct DataFrame
-        reader = csv.reader(data_str.splitlines())
-        rows = [r for r in reader if any(field.strip() != "" for field in r)]
-        if len(rows) < 1:
-            raise RuntimeError(f"No data rows found after header in {path}")
-        header = [h.strip() for h in rows[0]]
-        data = rows[1:]
-        df = pd.DataFrame(data, columns=header)
+    except Exception:
+        reader = csv.reader(data.splitlines())
+        rows = [r for r in reader if any(field.strip() for field in r)]
+        head = [h.strip() for h in rows[0]]
+        df = pd.DataFrame(rows[1:], columns=head)
         return df
-
 
 def parse_dates_and_index(df):
-    """Handle DATE or YEAR/MO/DY style headers and return df indexed by datetime."""
     cols = [c.strip() for c in df.columns]
     df.columns = cols
-
-    # YEAR / MO / DY (or DAY)
     if {'YEAR', 'MO'}.issubset(df.columns) and ('DY' in df.columns or 'DAY' in df.columns):
-        day_col = 'DY' if 'DY' in df.columns else 'DAY'
-        # coerce to numeric strings then to datetime
-        try:
-            y = df['YEAR'].astype(str).str.zfill(4)
-            m = df['MO'].astype(str).str.zfill(2)
-            d = df[day_col].astype(str).str.zfill(2)
-            df['date'] = pd.to_datetime(y + "-" + m + "-" + d, errors='coerce')
-        except Exception:
-            df['date'] = pd.to_datetime(df[['YEAR', 'MO', day_col]].apply(lambda row: f"{int(float(row[0])):04d}-{int(float(row[1])):02d}-{int(float(row[2])):02d}", axis=1), errors='coerce')
-
+        day = 'DY' if 'DY' in df.columns else 'DAY'
+        y = df['YEAR'].astype(str).str.zfill(4)
+        m = df['MO'].astype(str).str.zfill(2)
+        d = df[day].astype(str).str.zfill(2)
+        df['date'] = pd.to_datetime(y + "-" + m + "-" + d, errors='coerce')
         df = df.set_index('date')
         df.index.name = 'date'
         return df
-
-    # Single DATE column
     if 'DATE' in df.columns:
         df['date'] = pd.to_datetime(df['DATE'], errors='coerce', infer_datetime_format=True)
         df = df.set_index('date')
         df.index.name = 'date'
         return df
-
-    # Fallback: try parse first column as date
-    first_col = df.columns[0]
-    try:
-        df[first_col] = df[first_col].astype(str)
-        df['date'] = pd.to_datetime(df[first_col], errors='coerce', infer_datetime_format=True)
-        df = df.set_index('date')
-        df.index.name = 'date'
-        return df
-    except Exception as e:
-        raise RuntimeError("Could not parse date columns")
-
+    # fallback
+    first = df.columns[0]
+    df['date'] = pd.to_datetime(df[first].astype(str), errors='coerce', infer_datetime_format=True)
+    df = df.set_index('date')
+    df.index.name = 'date'
+    return df
 
 def load_power_csv(path):
-    """Load NASA POWER CSV robustly and return dataframe with numeric columns and datetime index."""
     with open(path, "r", encoding="utf8", errors="ignore") as f:
         lines = f.readlines()
-
     header_line = detect_header_line(lines)
     if header_line is None:
-        raise RuntimeError(f"Could not find header row in {path}")
-
-    # Read df from header line
+        raise RuntimeError("Header not found in " + path)
     df_raw = read_csv_from_header(path, header_line)
+    dfi = parse_dates_and_index(df_raw)
+    dfi = dfi[~dfi.index.isna()]
+    for c in dfi.columns:
+        dfi[c] = pd.to_numeric(dfi[c], errors='coerce')
+    dfi = dfi.dropna(how='all')
+    dfi = dfi.sort_index()
+    return dfi
 
-    # Debug info
-    print(f"DEBUG: {os.path.basename(path)} header_line={header_line} raw_rows={len(df_raw)} raw_columns={list(df_raw.columns)[:10]}")
+def parse_openmeteo_json(path):
+    import json
+    with open(path, 'r', encoding='utf8') as f:
+        j = json.load(f)
+    daily = j.get('daily', {})
+    dates = daily.get('time', [])
+    df = pd.DataFrame({'date': dates})
+    mapping = {
+        'precipitation_sum': 'PRECTOT',
+        'temperature_2m_max': 'T2M_MAX',
+        'temperature_2m_min': 'T2M_MIN',
+        'temperature_2m_mean': 'T2M',
+        'relativehumidity_2m_mean': 'RH2M',
+        'windspeed_10m_max': 'WS2M'
+    }
+    for k, v in mapping.items():
+        if k in daily:
+            df[v] = daily[k]
+    df['date'] = pd.to_datetime(df['date'], errors='coerce', infer_datetime_format=True)
+    df = df.set_index('date')
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+    return df
 
-    # Parse dates and index
-    df_indexed = parse_dates_and_index(df_raw)
-
-    # drop rows where index is NaT
-    df_indexed = df_indexed[~df_indexed.index.isna()]
-
-    # convert numeric-like columns to numeric (coerce errors)
-    for c in df_indexed.columns:
-        df_indexed[c] = pd.to_numeric(df_indexed[c], errors='coerce')
-
-    # drop rows where all values are NaN
-    df_indexed = df_indexed.dropna(how='all')
-
-    # sort & return only numeric columns
-    df_indexed = df_indexed.sort_index()
-    numcols = df_indexed.select_dtypes(include=[np.number]).columns.tolist()
-    df_num = df_indexed[numcols].copy()
-    print(f"DEBUG: after parsing {os.path.basename(path)} -> rows={len(df_num)} numeric_cols={numcols}")
-    return df_num
-
-
-def impute_and_resample(df):
+# ---------- feature engineering ----------
+def add_agro_features(df):
+    for col in KEEP_VARS:
+        if col not in df.columns:
+            df[col] = np.nan
+    df['precip_7d_sum'] = df['PRECTOT'].rolling(7, min_periods=1).sum()
+    df['tmax_7d_mean'] = df['T2M_MAX'].rolling(7, min_periods=1).mean()
+    df['tmin_7d_mean'] = df['T2M_MIN'].rolling(7, min_periods=1).mean()
+    df['rh_7d_mean'] = df['RH2M'].rolling(7, min_periods=1).mean()
+    df['t_range'] = df['T2M_MAX'] - df['T2M_MIN']
+    Ra_approx = 20.0
+    df['T_MEAN'] = df[['T2M', 'T2M_MAX', 'T2M_MIN']].mean(axis=1)
+    df['hargreaves_et0'] = 0.0023 * (df['T_MEAN'] + 17.8) * np.sqrt(np.clip(df['t_range'].fillna(0), 0.0, None)) * Ra_approx
     df = df.resample('D').mean()
     df = df.interpolate(method='time').ffill().bfill()
     return df
-
 
 def scale_and_save(df, out_csv_path, scaler_path):
     scaler = MinMaxScaler()
@@ -142,37 +137,120 @@ def scale_and_save(df, out_csv_path, scaler_path):
     joblib.dump(scaler, scaler_path)
     return scaled_df, scaler
 
+# ---------- main pipeline ----------
+from utils_fusion import (
+    align_sources,
+    compute_api_errors,
+    compute_weights_from_errors,
+    smooth_weights,
+    weighted_fusion,
+    save_weights
+)
+
+WEIGHTS_FILE = os.path.join(OUT_DIR, "weights.json")
+SMOOTH_ALPHA = 0.25
+ERROR_WINDOW_DAYS = 90  # compute error over last N days
+
+def load_raw_sources():
+    # find most recent NASA CSV and OpenMeteo JSON per point
+    nasa_files = sorted(glob.glob(os.path.join(NASA_DIR, "*.csv")))
+    open_files = sorted(glob.glob(os.path.join(RAW_DIR, "*.json")))
+    sources = {}
+    # load all NASA files, name them 'nasa:<basename>'
+    for p in nasa_files:
+        name = Path(p).stem  # e.g. field_1_nasa_YYYY...
+        try:
+            df = load_power_csv(p)
+            sources[name] = df
+        except Exception as e:
+            print("Failed loading NASA file", p, "->", e)
+    # load openmeteo files
+    for p in open_files:
+        name = Path(p).stem
+        try:
+            df = parse_openmeteo_json(p)
+            sources[name] = df
+        except Exception as e:
+            print("Failed loading OpenMeteo file", p, "->", e)
+    return sources
+
+def pick_named_groups(sources):
+    """
+    Group by logical API name: e.g. 'nasa' and 'openmeteo' per field.
+    We expect file stems like field_1_nasa_YYYY... and field_1_openmeteo_...
+    Returns dict of api_name -> df (concatenated across fields by union index)
+    """
+    apis = {}
+    for key, df in sources.items():
+        # key = field_1_nasa_...
+        parts = key.split("_")
+        # find 'nasa' or 'openmeteo' in the stem
+        api = 'unknown'
+        if 'nasa' in parts:
+            api = 'nasa'
+        elif 'openmeteo' in parts:
+            api = 'openmeteo'
+        else:
+            # fallback: try contains string
+            if 'nasa' in key:
+                api = 'nasa'
+            elif 'openmeteo' in key:
+                api = 'openmeteo'
+        # concat by union index (outer) per api
+        if api not in apis:
+            apis[api] = df.copy()
+        else:
+            # align and union (outer)
+            apis[api] = pd.concat([apis[api], df]).sort_index().groupby(level=0).mean()
+    return apis
+
+def compute_weights_and_fuse(apis, variables=KEEP_VARS, reference='nasa'):
+    # align
+    aligned = align_sources(apis)
+    # compute errors vs reference over recent window
+    # restrict to recent window length
+    last_date = None
+    for df in aligned.values():
+        if last_date is None or (len(df) > 0 and df.index.max() > last_date):
+            last_date = df.index.max()
+    if last_date is None:
+        last_date = pd.Timestamp.today()
+    window_start = last_date - pd.Timedelta(days=ERROR_WINDOW_DAYS)
+    aligned_window = {k: v.loc[(v.index >= window_start) & (v.index <= last_date)] for k, v in aligned.items()}
+    errors = compute_api_errors(aligned_window, reference=reference, variables=variables)
+    new_weights = compute_weights_from_errors(errors)
+    # smooth previous weights
+    old_weights = {}
+    if os.path.exists(WEIGHTS_FILE):
+        try:
+            with open(WEIGHTS_FILE, "r", encoding="utf8") as f:
+                old_weights = json.load(f)
+        except Exception:
+            old_weights = {}
+    smoothed = smooth_weights(old_weights, new_weights, alpha=SMOOTH_ALPHA)
+    # save weights
+    save_weights(smoothed, WEIGHTS_FILE)
+    # fuse using smoothed weights
+    fused = weighted_fusion(aligned, smoothed, variables=variables)
+    return fused, smoothed, errors
 
 if __name__ == "__main__":
-    files = glob.glob(os.path.join(DATA_DIR, "*.csv"))
-    if len(files) == 0:
-        print("No CSVs found in", DATA_DIR, " — run data_fetch.py first.")
+    sources = load_raw_sources()
+    if not sources:
+        print("No raw sources found. Run data_fetch.py first.")
         raise SystemExit(1)
-
-    for fpath in files:
-        print("Processing", fpath)
-        try:
-            df = load_power_csv(fpath)
-        except Exception as e:
-            print(f"ERROR loading {fpath}: {e}")
-            # print a few lines of the raw file to help debug
-            with open(fpath, "r", encoding="utf8", errors="ignore") as fh:
-                print("--- top 30 lines of file ---")
-                for i, line in enumerate(fh):
-                    if i >= 30:
-                        break
-                    print(i + 1, line.rstrip())
-            continue
-
-        keep = [c for c in KEEP_VARS if c in df.columns]
-        if len(keep) == 0:
-            print("No expected columns found in", fpath, " — columns:", df.columns.tolist())
-            continue
-
-        df = df[keep]
-        df = impute_and_resample(df)
-        base_name = os.path.splitext(os.path.basename(fpath))[0]
-        out_csv = os.path.join(OUT_DIR, base_name + "_proc.csv")
-        scaler_file = os.path.join(OUT_DIR, base_name + "_scaler.pkl")
-        scaled_df, scaler = scale_and_save(df, out_csv, scaler_file)
-        print("✅ Saved processed:", out_csv, "and scaler:", scaler_file, " (rows:", len(scaled_df), ")")
+    apis = pick_named_groups(sources)
+    print("APIs detected:", list(apis.keys()))
+    fused, weights, errors = compute_weights_and_fuse(apis, variables=KEEP_VARS, reference='nasa')
+    print("Computed weights:", weights)
+    # apply feature engineering
+    fused_features = add_agro_features(fused)
+    out_csv = os.path.join(OUT_DIR, "fused_proc.csv")
+    scaler_file = os.path.join(OUT_DIR, "fused_scaler.pkl")
+    scaled_df, scaler = scale_and_save(fused_features, out_csv, scaler_file)
+    print("Saved fused processed CSV:", out_csv)
+    print("Saved scaler:", scaler_file)
+    # also save weights & errors as json
+    with open(os.path.join(OUT_DIR, "fused_errors.json"), "w", encoding="utf8") as f:
+        json.dump({"errors": errors, "weights": weights}, f, indent=2)
+    print("Saved fused_errors.json")

@@ -1,13 +1,29 @@
-# Import required libraries
+# STEP 0 (optional but recommended)
+# Create and activate virtual environment
+python -m venv venv
+source venv/bin/activate      # Linux / Mac
+venv\Scripts\activate         # Windows
+
+# STEP 1
+# Install dependencies
 pip install -r requirements.txt
 
-# Fetch + preprocess data
-python3 src/data_fetch.py
-python3 src/preprocess.py
+# STEP 2
+# Fetch raw weather data from APIs
+python src/data_fetch.py
 
-# Train the model
-python3 src/train.py
+# STEP 3
+# Preprocess, compute API weights, fuse data, engineer features
+python src/preprocess.py
 
-# Predict + advisory + LLM summary
-ollama pull llama3   # only once
-python3 src/predict_and_postproc.py
+# STEP 4
+# Train the LSTM model on fused data
+python src/train.py
+
+# STEP 5
+# Generate predictions and farmer advisory
+python src/predict_and_advisory.py
+
+# STEP 6 (optional – production mode)
+# Run full pipeline every hour
+python src/scheduler.py

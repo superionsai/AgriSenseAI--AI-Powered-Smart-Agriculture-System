@@ -1,7 +1,8 @@
-pandas
 numpy
-scikit-learn
-torch
+pandas
 requests
-statsmodels
-ollama
+scikit-learn
+joblib
+torch
+apscheduler
+python-dateutil
