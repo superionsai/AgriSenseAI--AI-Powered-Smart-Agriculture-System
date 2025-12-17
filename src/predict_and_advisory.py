@@ -102,7 +102,7 @@ if __name__ == "__main__":
     from llm_interface import generate_advisory_text, translate_text
 
     language = "te"  # user-selected
-
+    clean_advisory = llm_out
     english = generate_advisory_text(clean_advisory)
 
     if language != "en":
