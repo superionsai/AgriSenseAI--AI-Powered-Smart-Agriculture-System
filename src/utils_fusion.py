@@ -7,19 +7,16 @@ import os
 def align_sources(dfs: dict):
     """
     dfs: dict name -> DataFrame indexed by date
-    Returns: dict of aligned DataFrames restricted to the intersection (common days).
+    Returns: dict of aligned DataFrames reindexed to union of indexes (so rows exist for all days),
+    with original columns preserved.
     """
-    idx = None
+    # compute union index
+    union_idx = pd.Index([])
     for df in dfs.values():
-        if idx is None:
-            idx = df.index
-        else:
-            idx = idx.intersection(df.index)
-    if idx is None or len(idx) == 0:
-        # fallback to union (we'll reindex and allow NaNs)
-        out = {k: v.sort_index() for k, v in dfs.items()}
-        return out
-    aligned = {k: v.reindex(idx).sort_index() for k, v in dfs.items()}
+        union_idx = union_idx.union(df.index)
+    union_idx = union_idx.sort_values()
+
+    aligned = {k: v.reindex(union_idx) for k, v in dfs.items()}
     return aligned
 
 def rmse_array(a, b):
@@ -35,7 +32,7 @@ def rmse_array(a, b):
 
 def compute_api_errors(aligned_dfs: dict, reference: str = "nasa", variables=None):
     """
-    aligned_dfs: name -> df (same index)
+    aligned_dfs: name -> df (indexed by same union index)
     reference: which API to treat as reference (e.g., 'nasa')
     variables: list of variable names to compare
     Returns: dict api_name -> mean RMSE across variables (reference skipped)
@@ -47,14 +44,18 @@ def compute_api_errors(aligned_dfs: dict, reference: str = "nasa", variables=Non
         # pick first as reference
         reference = list(aligned_dfs.keys())[0]
     ref_df = aligned_dfs[reference]
+
     for name, df in aligned_dfs.items():
         if name == reference:
             continue
         var_errs = []
         for v in variables:
-            if v in df.columns and v in ref_df.columns:
-                e = rmse_array(df[v].values, ref_df[v].values)
-                var_errs.append(e)
+            if (v in df.columns) and (v in ref_df.columns):
+                a = df[v].values
+                b = ref_df[v].values
+                e = rmse_array(a, b)
+                if np.isfinite(e):
+                    var_errs.append(e)
         errors[name] = float(np.mean(var_errs)) if var_errs else float("inf")
     return errors
 
@@ -72,7 +73,7 @@ def compute_weights_from_errors(errors: dict, eps: float = 1e-6):
             inv[k] = 0.0
     s = sum(inv.values())
     if s == 0:
-        # fallback: equal weights
+        # fallback: equal weights among keys
         n = max(1, len(inv))
         return {k: 1.0 / n for k in inv}
     return {k: (inv[k] / s) for k in inv}
@@ -93,37 +94,48 @@ def smooth_weights(old_weights: dict, new_weights: dict, alpha: float = 0.2):
         n = len(sm)
         return {k: 1.0/n for k in sm}
     return {k: v/s for k, v in sm.items()}
-
 def weighted_fusion(aligned_dfs: dict, weights: dict, variables):
     """
-    Produce a fused dataframe by weighted sum across API dataframes.
-    aligned_dfs: name -> df (reindexed to common index or union)
-    weights: name -> weight (weights may not sum to 1, but will be treated as proportions)
-    variables: list of variables to keep
-    Returns fused_df indexed the union of indexes with variables columns.
+    Weighted fusion with missing-aware logic:
+    - Missing value ⇒ contributes weight 0
+    - If a variable has no support from any API at any time ⇒ dropped
     """
-    # Determine union index
-    all_indexes = sorted({d.index for d in aligned_dfs.values()}, key=lambda x: len(x))[0]  # not used; simpler approach below
-    union_idx = pd.Index([]) 
+    import numpy as np
+    import pandas as pd
+
+    # union time index
+    union_idx = pd.Index([])
     for df in aligned_dfs.values():
         union_idx = union_idx.union(df.index)
     union_idx = union_idx.sort_values()
 
-    fused = pd.DataFrame(index=union_idx, columns=variables, dtype=float)
-    fused = fused.fillna(0.0)
-    total_weight = sum(weights.get(k, 0.0) for k in aligned_dfs.keys())
+    fused_sum = pd.DataFrame(0.0, index=union_idx, columns=variables)
+    weight_sum = pd.DataFrame(0.0, index=union_idx, columns=variables)
 
-    for name, df in aligned_dfs.items():
-        w = float(weights.get(name, 0.0))
+    for api, df in aligned_dfs.items():
+        w = float(weights.get(api, 0.0))
         if w == 0:
             continue
-        df_sel = df.reindex(union_idx)[variables].astype(float)
-        # multiply by weight and add
-        fused += df_sel.fillna(0.0) * w
 
-    # if weights didn't sum to 1, normalize fused by total_weight (if >0)
-    if total_weight > 0:
-        fused = fused / total_weight
+        df_use = df.reindex(index=union_idx, columns=variables)
+
+        valid = df_use.notna().astype(float)
+
+        fused_sum += df_use.fillna(0.0) * (valid * w)
+        weight_sum += valid * w
+
+    # divide only where weight exists
+    fused = fused_sum / weight_sum
+    fused = fused.where(weight_sum > 0)
+
+    # 🔥 DROP variables that are completely missing everywhere
+    keep_cols = fused.columns[fused.notna().any()].tolist()
+    fused = fused[keep_cols]
+
+    # enforce datetime index
+    fused.index = pd.to_datetime(fused.index, errors="coerce")
+    fused = fused.sort_index()
+
     return fused
 
 def save_weights(weights: dict, path: str):

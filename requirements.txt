@@ -6,3 +6,4 @@ joblib
 torch
 apscheduler
 python-dateutil
+meteostat

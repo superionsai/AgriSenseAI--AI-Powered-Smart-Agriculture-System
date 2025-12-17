@@ -82,6 +82,13 @@ if __name__ == "__main__":
     intervals = predict_intervals(FUSED_CSV, FUSED_SCALER, in_len=30, out_len=15, device=device)
     advisory = compute_advisory_from_intervals(intervals)
     final = {"forecast": intervals, "advisory": advisory}
+    from rules_engine import generate_recommendations
+
+    recs, acts = generate_recommendations(final["advisory"])
+
+    final["recommendations"] = recs
+    final["actions"] = acts
+
     llm_out = generate_advisory_text(final)
     final['llm'] = llm_out
     # attach weights info for transparency
@@ -91,3 +98,18 @@ if __name__ == "__main__":
     except Exception:
         final["fusion_weights"] = None
     print(json.dumps(final, indent=2))
+    
+    from llm_interface import generate_advisory_text, translate_text
+
+    language = "te"  # user-selected
+
+    english = generate_advisory_text(clean_advisory)
+
+    if language != "en":
+        final_text = translate_text(english, target_lang=language)
+    else:
+        final_text = english
+
+    print("\nFINAL ADVISORY:\n")
+    print(final_text)
+

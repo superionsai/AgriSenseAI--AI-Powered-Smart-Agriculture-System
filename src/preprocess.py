@@ -19,11 +19,7 @@ os.makedirs(OUT_DIR, exist_ok=True)
 
 KEEP_VARS = ['PRECTOT', 'T2M', 'T2M_MAX', 'T2M_MIN', 'RH2M', 'WS2M']
 
-from utils_fusion import (
-    detect_header_line if False else None  # placeholder for linter; we implement loaders below
-)
-
-# ---------- loaders ----------
+# ---------- CSV loaders for NASA POWER ----------
 def detect_header_line(lines):
     for i, line in enumerate(lines):
         s = line.strip()
@@ -62,13 +58,13 @@ def parse_dates_and_index(df):
         df.index.name = 'date'
         return df
     if 'DATE' in df.columns:
-        df['date'] = pd.to_datetime(df['DATE'], errors='coerce', infer_datetime_format=True)
+        df['date'] = pd.to_datetime(df['DATE'], errors='coerce')
         df = df.set_index('date')
         df.index.name = 'date'
         return df
     # fallback
     first = df.columns[0]
-    df['date'] = pd.to_datetime(df[first].astype(str), errors='coerce', infer_datetime_format=True)
+    df['date'] = pd.to_datetime(df[first].astype(str), errors='coerce')
     df = df.set_index('date')
     df.index.name = 'date'
     return df
@@ -88,6 +84,7 @@ def load_power_csv(path):
     dfi = dfi.sort_index()
     return dfi
 
+# ---------- load raw CSV/JSON (meteostat CSVs or other CSVs) ----------
 def parse_openmeteo_json(path):
     import json
     with open(path, 'r', encoding='utf8') as f:
@@ -106,7 +103,7 @@ def parse_openmeteo_json(path):
     for k, v in mapping.items():
         if k in daily:
             df[v] = daily[k]
-    df['date'] = pd.to_datetime(df['date'], errors='coerce', infer_datetime_format=True)
+    df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df = df.set_index('date')
     for c in df.columns:
         df[c] = pd.to_numeric(df[c], errors='coerce')
@@ -114,30 +111,92 @@ def parse_openmeteo_json(path):
 
 # ---------- feature engineering ----------
 def add_agro_features(df):
+    if df is None or len(df) == 0:
+        raise RuntimeError("No data passed to add_agro_features")
+
+    # 🔧 FIX: enforce DatetimeIndex
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index, errors="coerce")
+
+    df = df[~df.index.isna()]
+    df = df.sort_index()
+
     for col in KEEP_VARS:
         if col not in df.columns:
             df[col] = np.nan
+
     df['precip_7d_sum'] = df['PRECTOT'].rolling(7, min_periods=1).sum()
     df['tmax_7d_mean'] = df['T2M_MAX'].rolling(7, min_periods=1).mean()
     df['tmin_7d_mean'] = df['T2M_MIN'].rolling(7, min_periods=1).mean()
     df['rh_7d_mean'] = df['RH2M'].rolling(7, min_periods=1).mean()
     df['t_range'] = df['T2M_MAX'] - df['T2M_MIN']
-    Ra_approx = 20.0
     df['T_MEAN'] = df[['T2M', 'T2M_MAX', 'T2M_MIN']].mean(axis=1)
-    df['hargreaves_et0'] = 0.0023 * (df['T_MEAN'] + 17.8) * np.sqrt(np.clip(df['t_range'].fillna(0), 0.0, None)) * Ra_approx
+
+    # Hargreaves ET₀ (approx)
+    Ra = 20.0
+    df['hargreaves_et0'] = (
+        0.0023
+        * (df['T_MEAN'] + 17.8)
+        * np.sqrt(np.clip(df['t_range'], 0, None))
+        * Ra
+    )
+
+    # 🔧 NOW resampling is safe
     df = df.resample('D').mean()
     df = df.interpolate(method='time').ffill().bfill()
-    return df
 
+    return df
 def scale_and_save(df, out_csv_path, scaler_path):
+    """
+    Scaling with NO fabrication:
+    - Columns with any remaining NaNs are dropped
+    - Only fully-supported variables go to the model
+    """
+    import numpy as np
+    import pandas as pd
+    from sklearn.preprocessing import MinMaxScaler
+    import joblib
+    import json
+    import os
+
+    df_clean = df.copy()
+
+    # Drop columns that still contain NaNs
+    nan_cols = df_clean.columns[df_clean.isna().any()].tolist()
+    if nan_cols:
+        print("Dropping columns with unresolved NaNs:", nan_cols)
+        df_clean = df_clean.drop(columns=nan_cols)
+
+    # Final safety
+    df_clean.replace([np.inf, -np.inf], np.nan, inplace=True)
+    if df_clean.isna().any().any():
+        raise RuntimeError("NaNs remain after fusion — aborting scaling.")
+
     scaler = MinMaxScaler()
-    scaled = scaler.fit_transform(df.values)
-    scaled_df = pd.DataFrame(scaled, index=df.index, columns=df.columns)
+    scaled = scaler.fit_transform(df_clean.values)
+
+    scaled_df = pd.DataFrame(
+        scaled, index=df_clean.index, columns=df_clean.columns
+    )
+
     scaled_df.to_csv(out_csv_path)
     joblib.dump(scaler, scaler_path)
+
+    # Save metadata
+    meta = {
+        "dropped_nan_columns": nan_cols,
+        "final_columns": df_clean.columns.tolist(),
+        "n_rows": int(len(df_clean)),
+        "n_cols": int(len(df_clean.columns))
+    }
+
+    meta_path = os.path.join(os.path.dirname(out_csv_path), "fused_proc_meta.json")
+    with open(meta_path, "w", encoding="utf8") as f:
+        json.dump(meta, f, indent=2)
+
     return scaled_df, scaler
 
-# ---------- main pipeline ----------
+# ---------- fusion helpers (imported) ----------
 from utils_fusion import (
     align_sources,
     compute_api_errors,
@@ -151,64 +210,77 @@ WEIGHTS_FILE = os.path.join(OUT_DIR, "weights.json")
 SMOOTH_ALPHA = 0.25
 ERROR_WINDOW_DAYS = 90  # compute error over last N days
 
+# ---------- load raw sources robustly ----------
 def load_raw_sources():
-    # find most recent NASA CSV and OpenMeteo JSON per point
+    # NASA CSVs
     nasa_files = sorted(glob.glob(os.path.join(NASA_DIR, "*.csv")))
-    open_files = sorted(glob.glob(os.path.join(RAW_DIR, "*.json")))
+    # raw dir may contain meteostat CSVs or other csv/json
+    raw_csvs = sorted(glob.glob(os.path.join(RAW_DIR, "*.csv")))
+    raw_jsons = sorted(glob.glob(os.path.join(RAW_DIR, "*.json")))
     sources = {}
-    # load all NASA files, name them 'nasa:<basename>'
     for p in nasa_files:
-        name = Path(p).stem  # e.g. field_1_nasa_YYYY...
+        name = Path(p).stem
         try:
             df = load_power_csv(p)
             sources[name] = df
         except Exception as e:
             print("Failed loading NASA file", p, "->", e)
-    # load openmeteo files
-    for p in open_files:
+    for p in raw_csvs + raw_jsons:
         name = Path(p).stem
         try:
-            df = parse_openmeteo_json(p)
+            if p.lower().endswith(".json"):
+                df = parse_openmeteo_json(p)
+            else:
+                # CSV from Meteostat or other tools - load with pandas and ensure datetime index
+                df = pd.read_csv(p, index_col=0, parse_dates=True)
+                # coerce numeric
+                for c in df.columns:
+                    df[c] = pd.to_numeric(df[c], errors='coerce')
             sources[name] = df
         except Exception as e:
-            print("Failed loading OpenMeteo file", p, "->", e)
+            print("Failed loading raw file", p, "->", e)
     return sources
 
 def pick_named_groups(sources):
     """
-    Group by logical API name: e.g. 'nasa' and 'openmeteo' per field.
-    We expect file stems like field_1_nasa_YYYY... and field_1_openmeteo_...
-    Returns dict of api_name -> df (concatenated across fields by union index)
+    Map file stems into API groups: 'nasa', 'meteostat', 'openmeteo', or 'other'.
+    Concatenate multiple files per API by taking index-wise mean (outer union).
     """
     apis = {}
     for key, df in sources.items():
-        # key = field_1_nasa_...
-        parts = key.split("_")
-        # find 'nasa' or 'openmeteo' in the stem
-        api = 'unknown'
-        if 'nasa' in parts:
+        parts = key.lower().split("_")
+        if 'nasa' in parts or 'nasa' in key.lower():
             api = 'nasa'
-        elif 'openmeteo' in parts:
+        elif 'meteostat' in parts or 'meteostat' in key.lower():
+            api = 'meteostat'
+        elif 'openmeteo' in parts or 'openmeteo' in key.lower():
             api = 'openmeteo'
         else:
-            # fallback: try contains string
-            if 'nasa' in key:
-                api = 'nasa'
-            elif 'openmeteo' in key:
-                api = 'openmeteo'
-        # concat by union index (outer) per api
+            api = 'other'
         if api not in apis:
             apis[api] = df.copy()
         else:
-            # align and union (outer)
+            # union by index, take mean where overlapping
             apis[api] = pd.concat([apis[api], df]).sort_index().groupby(level=0).mean()
     return apis
 
 def compute_weights_and_fuse(apis, variables=KEEP_VARS, reference='nasa'):
-    # align
     aligned = align_sources(apis)
-    # compute errors vs reference over recent window
-    # restrict to recent window length
+    # if only one api present -> return it as fused with weight 1.0
+    if len(aligned) == 0:
+        raise RuntimeError("No API data available to fuse.")
+    if len(aligned) == 1:
+        only_name = list(aligned.keys())[0]
+        fused = aligned[only_name].copy()
+        weights = {only_name: 1.0}
+        # ensure we only return requested variables (add missing as NaN)
+        for v in variables:
+            if v not in fused.columns:
+                fused[v] = np.nan
+        fused = fused[variables].sort_index()
+        save_weights(weights, WEIGHTS_FILE)
+        return fused, weights, {}
+    # compute recent-window errors
     last_date = None
     for df in aligned.values():
         if last_date is None or (len(df) > 0 and df.index.max() > last_date):
@@ -219,7 +291,6 @@ def compute_weights_and_fuse(apis, variables=KEEP_VARS, reference='nasa'):
     aligned_window = {k: v.loc[(v.index >= window_start) & (v.index <= last_date)] for k, v in aligned.items()}
     errors = compute_api_errors(aligned_window, reference=reference, variables=variables)
     new_weights = compute_weights_from_errors(errors)
-    # smooth previous weights
     old_weights = {}
     if os.path.exists(WEIGHTS_FILE):
         try:
@@ -228,12 +299,11 @@ def compute_weights_and_fuse(apis, variables=KEEP_VARS, reference='nasa'):
         except Exception:
             old_weights = {}
     smoothed = smooth_weights(old_weights, new_weights, alpha=SMOOTH_ALPHA)
-    # save weights
     save_weights(smoothed, WEIGHTS_FILE)
-    # fuse using smoothed weights
     fused = weighted_fusion(aligned, smoothed, variables=variables)
     return fused, smoothed, errors
 
+# ---------- main ----------
 if __name__ == "__main__":
     sources = load_raw_sources()
     if not sources:
@@ -243,14 +313,12 @@ if __name__ == "__main__":
     print("APIs detected:", list(apis.keys()))
     fused, weights, errors = compute_weights_and_fuse(apis, variables=KEEP_VARS, reference='nasa')
     print("Computed weights:", weights)
-    # apply feature engineering
     fused_features = add_agro_features(fused)
     out_csv = os.path.join(OUT_DIR, "fused_proc.csv")
     scaler_file = os.path.join(OUT_DIR, "fused_scaler.pkl")
     scaled_df, scaler = scale_and_save(fused_features, out_csv, scaler_file)
     print("Saved fused processed CSV:", out_csv)
     print("Saved scaler:", scaler_file)
-    # also save weights & errors as json
     with open(os.path.join(OUT_DIR, "fused_errors.json"), "w", encoding="utf8") as f:
         json.dump({"errors": errors, "weights": weights}, f, indent=2)
     print("Saved fused_errors.json")
